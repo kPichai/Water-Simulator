@@ -118,10 +118,10 @@ const NORMAL_STRENGTH = 1.8; // Slightly increased for better visibility
 
 // --- Water Colors ---
 const VELOCITY_COLOR = { // TUNABLE
-    slow: 'rgba(40, 110, 175, 0.95)',   // Deeper, more saturated blue base
-    medium: 'rgba(65, 145, 200, 0.9)',   // Mid-tone blue
-    fast: 'rgba(120, 180, 235, 0.85)',  // Light blue for high movement
-    highlight: 'rgba(180, 215, 245, 0.7)' // Highlight color
+    slow: 'rgba(40, 110, 175, 0.95)',   // Deeper blue base
+    medium: 'rgba(65, 195, 120, 0.9)',   // Green for medium velocity (changed from blue)
+    fast: 'rgba(240, 120, 50, 0.85)',    // Orange-red for high velocity (changed from light blue)
+    highlight: 'rgba(255, 230, 180, 0.7)' // Highlight color
 };
 const MAX_VELOCITY_COLOR = 500; // TUNABLE: Adjust based on observed velocities
 
@@ -1728,11 +1728,83 @@ function drawWebGL() {
             gl.enableVertexAttribArray(particlePositionAttributeLocation);
             gl.vertexAttribPointer(particlePositionAttributeLocation, 2, gl.FLOAT, false, 0, 0);
             gl.uniform2f(resolutionUniformLocation, canvas.width, canvas.height);
-            // Particle color when metaballs are off (e.g., a simple blue)
-            gl.uniform4f(particleColorUniformLocation, 0.3, 0.5, 0.9, 0.8);
-            gl.uniform1f(particleSizeUniformLocation, PARTICLE_DRAW_SIZE);
-
-            gl.drawArrays(gl.POINTS, 0, particles.length); // Use actual particle count
+            
+            // Define a function to calculate average velocity for color
+            function calculateAverageVelocity() {
+                if (particles.length === 0) return 0;
+                let totalVel = 0;
+                let maxVel = 0;
+                
+                for (const p of particles) {
+                    const vel = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
+                    totalVel += vel;
+                    maxVel = Math.max(maxVel, vel);
+                }
+                
+                return {
+                    avg: totalVel / particles.length,
+                    max: maxVel
+                };
+            }
+            
+            // Check if we should use velocity-based coloring for particles
+            if (currentColorMode === COLOR_MODE.VELOCITY) {
+                // Draw each particle individually with its velocity color
+                for (let i = 0; i < particles.length; i++) {
+                    const p = particles[i];
+                    const vel = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
+                    // Get max velocity for normalization
+                    const velStats = calculateAverageVelocity();
+                    const normalizedVel = Math.min(1.0, vel / (velStats.max * 0.7 || 1)); // Use 70% of max vel as cap
+                    
+                    // Parse the velocity color
+                    const color = getVelocityColor(normalizedVel);
+                    const colorMatch = color.match(/rgba?\((\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+))?\)/);
+                    
+                    if (colorMatch) {
+                        const r = parseInt(colorMatch[1]) / 255;
+                        const g = parseInt(colorMatch[2]) / 255;
+                        const b = parseInt(colorMatch[3]) / 255;
+                        const a = colorMatch[4] ? parseFloat(colorMatch[4]) : 1.0;
+                        
+                        // Set uniform color for this particle
+                        gl.uniform4f(particleColorUniformLocation, r, g, b, a);
+                        gl.uniform1f(particleSizeUniformLocation, PARTICLE_DRAW_SIZE);
+                        
+                        // Draw just this one particle
+                        gl.drawArrays(gl.POINTS, i, 1);
+                    }
+                }
+            } else if (currentColorMode === COLOR_MODE.DEPTH) {
+                // Draw each particle with depth-based color
+                for (let i = 0; i < particles.length; i++) {
+                    const p = particles[i];
+                    const normalizedDepth = Math.max(0, Math.min(1, (p.y - tankY) / tankHeight));
+                    
+                    // Parse the depth color
+                    const color = getDepthColor(normalizedDepth);
+                    const colorMatch = color.match(/rgba?\((\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+))?\)/);
+                    
+                    if (colorMatch) {
+                        const r = parseInt(colorMatch[1]) / 255;
+                        const g = parseInt(colorMatch[2]) / 255;
+                        const b = parseInt(colorMatch[3]) / 255;
+                        const a = colorMatch[4] ? parseFloat(colorMatch[4]) : 1.0;
+                        
+                        // Set uniform color for this particle
+                        gl.uniform4f(particleColorUniformLocation, r, g, b, a);
+                        gl.uniform1f(particleSizeUniformLocation, PARTICLE_DRAW_SIZE);
+                        
+                        // Draw just this one particle
+                        gl.drawArrays(gl.POINTS, i, 1);
+                    }
+                }
+            } else {
+                // Use default color for all particles when no special coloring is active
+                gl.uniform4f(particleColorUniformLocation, 0.3, 0.5, 0.9, 0.8);
+                gl.uniform1f(particleSizeUniformLocation, PARTICLE_DRAW_SIZE);
+                gl.drawArrays(gl.POINTS, 0, particles.length); // Use actual particle count
+            }
 
             gl.disableVertexAttribArray(particlePositionAttributeLocation);
             checkGLError("drawParticles");
@@ -2403,11 +2475,11 @@ function getVelocityColor(normalizedVelocity) {
     }
     
     const t = Math.max(0, Math.min(1, normalizedVelocity));
-    // Interpolate between slow, medium, and fast blue colors
-    if (t < 0.5) {
-        return interpolateColor(VELOCITY_COLOR.slow, VELOCITY_COLOR.medium, t / 0.5);
+    // Interpolate between slow, medium, and fast colors with more obvious transitions
+    if (t < 0.4) {
+        return interpolateColor(VELOCITY_COLOR.slow, VELOCITY_COLOR.medium, t / 0.4);
     } else {
-        return interpolateColor(VELOCITY_COLOR.medium, VELOCITY_COLOR.fast, (t - 0.5) / 0.5);
+        return interpolateColor(VELOCITY_COLOR.medium, VELOCITY_COLOR.fast, (t - 0.4) / 0.6);
     }
 }
 
