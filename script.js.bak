@@ -1,0 +1,489 @@
+// --- Global Variables ---
+let gl = null;             // WebGL context
+let overlayCanvas = null;  // 2D canvas for overlays
+let overlayCtx = null;    // 2D context for overlays
+let canvas = null;         // WebGL canvas (renamed from original)
+let surfaceCanvas = null;  // Canvas for rendering smooth water surface
+let surfaceCtx = null;     // 2D context for surface rendering
+
+// --- WebGL Specific Globals ---
+let particleShaderProgram = null;
+let particlePositionBuffer = null;
+let particlePositionAttributeLocation = -1;
+let particleColorUniformLocation = null;
+let resolutionUniformLocation = null;
+let particleSizeUniformLocation = null;
+
+let foamShaderProgram = null; 
+let foamPositionBuffer = null;
+let foamPositionAttributeLocation = -1;
+let foamColorAttributeLocation = -1; 
+let foamResolutionUniformLocation = null;
+let foamSizeUniformLocation = null;
+let foamColorBuffer = null; 
+
+// --- UI Control Elements ---
+let taitBSlider = null;
+let taitBValueSpan = null;
+let substepsSlider = null;
+let substepsValueSpan = null;
+let viscositySlider = null;
+let viscosityValueSpan = null;
+
+// --- Utility Function for Checking Invalid Numbers ---
+function isInvalid(val) {
+    return val === null || val === undefined || isNaN(val) || !isFinite(val);
+}
+
+// --- Configuration (Constants & Tunable Variables) ---
+const NUM_PARTICLES = 1000; // Keep or adjust based on performance
+const PARTICLE_RADIUS = 22;
+const MIN_PARTICLE_DISTANCE = PARTICLE_RADIUS; // Minimum separation
+const MIN_PARTICLE_DISTANCE_SQ = MIN_PARTICLE_DISTANCE * MIN_PARTICLE_DISTANCE;
+// --- Visual Adjustments --- (Near other constants)
+const PARTICLE_DRAW_SIZE = 25 * window.devicePixelRatio; // Example size (TUNABLE)
+const FOAM_PARTICLE_DRAW_SIZE = 5.0 * window.devicePixelRatio; // Example size (TUNABLE)
+const INITIAL_SPACING = PARTICLE_RADIUS * 1.8; // Base H on this spacing
+const H = INITIAL_SPACING * 2.0; // Slightly larger H relative to spacing might help stability
+const H_SQ = H * H;
+
+let PARTICLE_MASS = 1.0; // Will be calculated
+// Using area-based mass calculation.
+// TARGET_REST_DENSITY might need tuning (e.g., 1.0, 1.5, 2.0)
+const TARGET_REST_DENSITY = 0.8; // TUNABLE
+const REST_DENSITY = TARGET_REST_DENSITY;
+let POLY6_FACTOR = 0;
+let SPIKY_GRAD_FACTOR = 0;
+
+// Add these near your other global variables like 'gl', 'canvas', etc.
+let tankX = 0;      // Tank's left edge X position
+let tankY = 0;      // Tank's top edge Y position
+let tankWidth = 0;  // Tank's width in pixels
+let tankHeight = 0; // Tank's height in pixels
+// --- Virtual Tank Area --- (Near other constants)
+const TANK_WIDTH_RATIO = 0.7; // Example: 70% of canvas width (TUNABLE)
+const TANK_HEIGHT_RATIO = 0.8; // Example: 80% of canvas height (TUNABLE)
+
+// Equation of State (Tait's Equation)
+const TAIT_GAMMA = 7.0;
+
+// --- TUNABLE PARAMETERS (Recommended Starting Values for 'david.li/fluid' style) ---
+// Sliders control these:
+let TAIT_B = 50000; // START MUCH LOWER (Stiffness, e.g., 500-1500) - Use Slider
+let NUM_SUBSTEPS = 20; // START LOW (e.g., 8-15), increase ONLY if unstable - Use Slider
+let VISCOSITY_COEFFICIENT = 0.05; // Standard Viscosity (e.g., 0.05 - 0.2) - Use Slider
+
+// --- Constants below are tuned directly in code ---
+// Gravity - Adjust multiplier for desired weight/settling speed
+const GRAVITY = 9.8 * 100; // TUNABLE (e.g., 50 - 100)
+
+// Boundary Parameters - Make them softer
+const BOUNDARY_FORCE = 500000000; // TUNABLE: Lower repulsive force (e.g., 200 - 600)
+const BOUNDARY_DISTANCE = PARTICLE_RADIUS * 1;
+const FRICTION = 0.2; // TUNABLE: Higher friction (e.g., 0.5 - 0.9)
+const RESTITUTION = 0.02; // TUNABLE: Very low bounce (e.g., 0.0 - 0.1)
+
+// --- Web Worker for Physics ---
+let physicsWorker = null;
+let isWorkerBusy = false;
+let lastMouseState = null;
+let foamSpawnQueue = [];
+let lastTime = 0;
+let timeAccumulatorForFps = 0;
+let frameCountForFps = 0;
+let displayedFps = 60;
+let particles = [];
+let particlePositions = null;
+let foamPositions = null;
+let foamColors = null;
+// Constants for rendering
+const MAX_VELOCITY = 2000.0;
+const MAX_VELOCITY_SQ = MAX_VELOCITY * MAX_VELOCITY;
+let foamVelocityThreshold = 8.0;
+let gridCellSize = H; // Use smoothing radius as cell size for neighbor search
+
+// --- Simulation State ---
+let foamParticles = []; // Stores foam particle objects {x, y, vx, vy, life}
+let activeFoamCount = 0; // Number of active foam particles
+let grid = {};
+let mouse = { x: -1000, y: -1000, leftDown: false, rightDown: false };
+
+// Mouse interaction parameters
+const MOUSE_RADIUS = 60; // TUNABLE: Try 40-80 for different brush sizes
+const MOUSE_STRENGTH = 200; // TUNABLE: 100-500, higher = stronger force
+
+// --- Initialization ---
+function init() {
+    console.log("Init started...");
+    canvas = document.getElementById('webglCanvas');
+    overlayCanvas = document.getElementById('overlayCanvas');
+    if (!canvas || !overlayCanvas) { console.error("Canvas elements not found!"); alert("Error: Canvas elements missing."); return; }
+
+    surfaceCanvas = document.createElement('canvas');
+    surfaceCanvas.id = 'surfaceCanvas';
+    surfaceCanvas.style.position = 'absolute';
+    surfaceCanvas.style.top = '0'; surfaceCanvas.style.left = '0';
+    surfaceCanvas.style.width = '100%'; surfaceCanvas.style.height = '100%';
+    surfaceCanvas.style.pointerEvents = 'none';
+    surfaceCanvas.style.zIndex = '2'; 
+    if (document.body) {
+        document.body.appendChild(surfaceCanvas);
+    } else {
+        console.error("document.body not available yet during init."); return;
+    }
+
+    // Attempt to get WebGL2, fall back to WebGL1
+    gl = canvas.getContext('webgl2') || canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+    
+    overlayCtx = overlayCanvas.getContext('2d');
+    surfaceCtx = surfaceCanvas.getContext('2d');
+
+    if (!gl) { console.error("Failed to get WebGL context."); alert("Error: WebGL not supported."); return; }
+    if (!overlayCtx || !surfaceCtx) { console.error("Failed to get 2D context."); alert("Error: Could not get 2D context."); return; }
+    console.log("WebGL and 2D contexts obtained.");
+
+    if (gl instanceof WebGL2RenderingContext) {
+        console.log("WebGL 2.0 context obtained.");
+    } else {
+        console.log("WebGL 1.0 context obtained.");
+    }
+
+    if (!initWebGL()) { console.error("Failed to initialize WebGL."); alert("Error: WebGL initialization failed."); return; }
+    console.log("WebGL initialized.");
+
+    // --- Setup UI Controls ---
+    setupSliders(); // Initialize sliders and listeners
+
+    // --- CRITICAL ORDER ---
+    resizeCanvas(); // 1. Resize first
+    console.log("resizeCanvas completed.");
+    calculatePhysicsConstants(); // 2. Calculate constants (uses H derived from spacing)
+    console.log("calculatePhysicsConstants completed.");
+
+    setupMouseEvents();
+    setupKeyboardControls();
+    console.log("Event handlers setup completed.");
+
+    // Initialize buffers
+    particlePositions = new Float32Array(NUM_PARTICLES * 2);
+    foamPositions = new Float32Array(MAX_FOAM_PARTICLES * 2); 
+    foamColors = new Float32Array(MAX_FOAM_PARTICLES * 4); 
+
+    // Initialize and spawn particles
+    spawnParticles(); 
+    console.log("spawnParticles completed.");
+    
+    // Initialize Physics Web Worker
+    initPhysicsWorker();
+    console.log("Physics worker initialized.");
+
+    console.log("Initialization complete. Starting animation loop...");
+    requestAnimationFrame(update); // Start the loop
+}
+
+// --- Initialize Physics Worker ---
+function initPhysicsWorker() {
+    if (window.Worker) {
+        physicsWorker = new Worker('physics.js');
+        physicsWorker.onmessage = handleWorkerMessage;
+        
+        // Initialize worker with particle data
+        physicsWorker.postMessage({
+            type: 'init',
+            particles: particles
+        });
+        
+        console.log("Physics worker created and initialized.");
+    } else {
+        console.error("Web Workers not supported in this browser.");
+        alert("Your browser doesn't support Web Workers. The simulation will run slower.");
+    }
+}
+
+// --- Handle messages from physics worker ---
+function handleWorkerMessage(e) {
+    const data = e.data;
+    
+    // Update particles with the data from the worker
+    particles = data.particles;
+    
+    // Update particle positions buffer for rendering
+    for (let i = 0; i < particles.length; i++) {
+        const p = particles[i];
+        if (!isInvalid(p.x) && !isInvalid(p.y)) {
+            particlePositions[i * 2] = p.x;
+            particlePositions[i * 2 + 1] = p.y;
+        }
+    }
+    
+    // Handle any foam spawns returned from the worker
+    if (data.foamSpawns && data.foamSpawns.length > 0) {
+        foamSpawnQueue = foamSpawnQueue.concat(data.foamSpawns);
+    }
+    
+    // Mark worker as no longer busy
+    isWorkerBusy = false;
+}
+
+function spawnParticles() {
+    particles = [];
+    foamParticles = []; // Clear foam objects
+    activeFoamCount = 0; // Reset foam count
+
+    // Use tank dimensions for spawning checks if they are validly calculated
+    const useTank = tankWidth > 0 && tankHeight > 0;
+    // Define the area where particles will be initially placed
+    const spawnAreaWidth = useTank ? tankWidth : (canvas ? canvas.width : 100);
+    // Spawn in the top half (e.g., 50%) of the available tank/canvas height
+    const spawnAreaHeight = useTank ? tankHeight * 0.5 : (canvas ? canvas.height * 0.5 : 100);
+    const spawnOffsetX = useTank ? tankX : 0; // Left edge of spawn area
+    const spawnOffsetY = useTank ? tankY : 0; // Top edge of spawn area
+
+    if (spawnAreaWidth <= 0 || spawnAreaHeight <= 0) {
+         console.error("Cannot spawn particles, spawn area invalid (width or height is zero). Tank calculated?", tankWidth, tankHeight);
+         return;
+    }
+    
+    // Estimate number of columns/rows needed based on spawn area and particle spacing
+    const estCols = Math.max(1, Math.floor(spawnAreaWidth / INITIAL_SPACING));
+    const estRows = Math.ceil(NUM_PARTICLES / estCols); // Rows needed to fit all particles
+
+    // Calculate starting position to center the block within the spawn area
+    const startX = spawnOffsetX + spawnAreaWidth / 2 - (estCols / 2) * INITIAL_SPACING;
+    // Start spawning near the top of the defined spawn area height
+    const startY = spawnOffsetY + spawnAreaHeight * 0.2;
+
+    let currentParticleIndex = 0;
+    for (let i = 0; i < NUM_PARTICLES; i++) {
+        const col = i % estCols;
+        const row = Math.floor(i / estCols);
+
+        // Calculate position with jitter
+        let x = startX + col * INITIAL_SPACING + (Math.random() - 0.5) * INITIAL_SPACING * 0.1;
+        let y = startY + row * INITIAL_SPACING + (Math.random() - 0.5) * INITIAL_SPACING * 0.1;
+
+        // --- Ensure within the VIRTUAL TANK bounds initially ---
+        const radiusBuffer = PARTICLE_RADIUS + 1; // Add a small buffer
+        // Define min/max bounds based on the virtual tank dimensions
+        const minX_bound = spawnOffsetX + radiusBuffer;
+        const maxX_bound = spawnOffsetX + tankWidth - radiusBuffer; // Use full tank width for bounds
+        const minY_bound = spawnOffsetY + radiusBuffer;
+        const maxY_bound = spawnOffsetY + tankHeight - radiusBuffer; // Use full tank height for bounds
+
+        // Clamp initial position to be within the tank
+        x = Math.max(minX_bound, Math.min(x, maxX_bound));
+        y = Math.max(minY_bound, Math.min(y, maxY_bound));
+        // ---
+
+        if (particles.length < NUM_PARTICLES) {
+           const p = createParticle(x, y);
+           particles.push(p);
+           // Populate WebGL buffer data
+           if (currentParticleIndex * 2 + 1 < particlePositions.length) {
+               particlePositions[currentParticleIndex * 2] = x;
+               particlePositions[currentParticleIndex * 2 + 1] = y;
+               currentParticleIndex++;
+           }
+        } else {
+            // Stop if we have created the requested number of particles
+            break;
+        }
+    }
+
+    // Initialize particle position buffer data in WebGL
+    if (gl && particlePositionBuffer && particles.length > 0) {
+        gl.bindBuffer(gl.ARRAY_BUFFER, particlePositionBuffer);
+        // Upload only the data for the particles actually created
+        gl.bufferData(gl.ARRAY_BUFFER, particlePositions.subarray(0, particles.length * 2), gl.DYNAMIC_DRAW);
+        gl.bindBuffer(gl.ARRAY_BUFFER, null);
+    } else if (particles.length === 0) {
+         console.warn("No particles spawned.");
+    }
+
+    // Initialize foam buffer with empty data (important for bufferSubData later)
+    if (gl && foamPositionBuffer && MAX_FOAM_PARTICLES > 0) {
+        gl.bindBuffer(gl.ARRAY_BUFFER, foamPositionBuffer);
+        // Allocate buffer size for maximum foam particles
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(MAX_FOAM_PARTICLES * 2), gl.DYNAMIC_DRAW);
+        gl.bindBuffer(gl.ARRAY_BUFFER, null);
+    }
+
+    // Initialize foam color buffer with empty data
+    if (gl && foamColorBuffer && MAX_FOAM_PARTICLES > 0) {
+        gl.bindBuffer(gl.ARRAY_BUFFER, foamColorBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(MAX_FOAM_PARTICLES * 4), gl.DYNAMIC_DRAW); // RGBA
+        gl.bindBuffer(gl.ARRAY_BUFFER, null); 
+    }
+
+    console.log(`Spawned ${particles.length} particles within tank area.`);
+}
+
+function createParticle(x, y) {
+    return {
+        x: x,
+        y: y,
+        vx: 0,
+        vy: 0,
+        ax: 0,
+        ay: 0,
+        pressure: 0,
+        density: 0,
+        neighbors: []
+    };
+}
+
+function resizeCanvas() {
+    if (!canvas || !overlayCanvas || !surfaceCanvas) return;
+
+    const cssWidth = canvas.clientWidth;
+    const cssHeight = canvas.clientHeight;
+    const displayWidth = Math.max(1, Math.floor(cssWidth * window.devicePixelRatio));
+    const displayHeight = Math.max(1, Math.floor(cssHeight * window.devicePixelRatio));
+
+    let resized = false;
+    if (canvas.width !== displayWidth || canvas.height !== displayHeight) {
+        canvas.width = displayWidth; canvas.height = displayHeight;
+        overlayCanvas.width = displayWidth; overlayCanvas.height = displayHeight;
+        surfaceCanvas.width = displayWidth; surfaceCanvas.height = displayHeight;
+
+        if (gl) { gl.viewport(0, 0, canvas.width, canvas.height); }
+        console.log(`Canvas resized to: ${canvas.width} x ${canvas.height}`);
+        resized = true;
+    }
+
+    // --- Calculate Virtual Tank Dimensions ---
+    // Always recalculate tank dimensions, even if canvas size didn't change,
+    // as ratios might change or initial calculation is needed.
+    tankWidth = displayWidth * TANK_WIDTH_RATIO;
+    tankHeight = displayHeight * TANK_HEIGHT_RATIO;
+    // Center the tank horizontally
+    tankX = (displayWidth - tankWidth) / 2;
+    // Place the tank near the top (adjust vertical offset if needed)
+    tankY = displayHeight * 0.05; // Small offset from top (e.g., 5% of height)
+    // ---
+
+    // Update surface canvas CSS position to match webglCanvas via getBoundingClientRect
+    // Needs to run even if not resized, in case of scrolling or layout shifts
+     try {
+        const rect = canvas.getBoundingClientRect();
+        surfaceCanvas.style.position = 'absolute'; // Ensure positioning context
+        // Adjust for scroll position if canvas isn't at top-left of viewport
+        surfaceCanvas.style.top = `${rect.top + window.scrollY}px`;
+        surfaceCanvas.style.left = `${rect.left + window.scrollX}px`;
+        surfaceCanvas.style.width = `${rect.width}px`;
+        surfaceCanvas.style.height = `${rect.height}px`;
+     } catch (e) {
+        console.warn("Could not update surfaceCanvas position:", e);
+     }
+}
+
+// --- Simulation Loop ---
+function update(currentTime) {
+    if (!canvas || !gl) { console.error("Update loop stopped: Canvas or Context missing."); return; }
+    currentTime *= 0.001; // Convert ms to seconds
+    let dt = currentTime - lastTime;
+    if (lastTime === 0) dt = 1.0 / 60.0; // Initial frame dt
+    dt = Math.min(dt, 1.0 / 30.0); // Cap max frame time step (e.g., 33ms)
+
+    if (dt <= 0) { // Skip if time hasn't passed
+        lastTime = currentTime;
+        requestAnimationFrame(update);
+        return;
+    }
+
+    // --- FPS Calculation ---
+    timeAccumulatorForFps += dt;
+    frameCountForFps++;
+    if (timeAccumulatorForFps >= 0.5) { 
+        displayedFps = frameCountForFps / timeAccumulatorForFps;
+        timeAccumulatorForFps = 0;
+        frameCountForFps = 0;
+    }
+    // --- End FPS Calculation ---
+
+    const currentSubsteps = NUM_SUBSTEPS; 
+    if (currentSubsteps <= 0) { 
+         lastTime = currentTime;
+         requestAnimationFrame(update);
+         return;
+    }
+    lastTime = currentTime;
+
+    // --- Simulation Steps (CPU only) ---
+    try {
+        updateGrid();
+        
+        if (!Array.isArray(particles)) {
+            console.error("Particles array is invalid!");
+            particles = []; 
+        } else if (particles.length > 0) {
+            for (const p of particles) { getNeighbors(p); }
+
+            const sub_dt = dt / currentSubsteps;
+
+            for (let i = 0; i < currentSubsteps; i++) {
+                calculateDensityPressure(); 
+                applyForces(sub_dt);        
+                integrate(sub_dt);          
+                applyConstraints();         
+            }
+        }
+
+        updateFoam(dt);
+
+    } catch (error) {
+        console.error("Error during physics simulation step:", error, error.stack);
+        // alert("Simulation error occurred. Check console."); // Optional: uncomment for user alert
+    }
+
+    // --- Update WebGL Buffers & Draw ---
+    try {
+        if (particles.length > 0 && particlePositions.length >= particles.length * 2) {
+            gl.bindBuffer(gl.ARRAY_BUFFER, particlePositionBuffer);
+            gl.bufferSubData(gl.ARRAY_BUFFER, 0, particlePositions.subarray(0, particles.length * 2));
+            checkGLError("bufferSubData particles");
+        }
+
+        if (enableFoam && activeFoamCount > 0 && foamPositions.length >= activeFoamCount * 2) {
+             gl.bindBuffer(gl.ARRAY_BUFFER, foamPositionBuffer);
+             gl.bufferSubData(gl.ARRAY_BUFFER, 0, foamPositions.subarray(0, activeFoamCount * 2));
+             checkGLError("bufferSubData foam positions");
+             
+             gl.bindBuffer(gl.ARRAY_BUFFER, foamColorBuffer);
+             gl.bufferSubData(gl.ARRAY_BUFFER, 0, foamColors.subarray(0, activeFoamCount * 4));
+             checkGLError("bufferSubData foam colors");
+        }
+        gl.bindBuffer(gl.ARRAY_BUFFER, null); 
+
+        // --- Drawing ---
+        if (enableMetaballs) {
+             drawSurface(); 
+             if(surfaceCanvas) surfaceCanvas.style.display = 'block'; 
+        } else {
+             if(surfaceCanvas) surfaceCanvas.style.display = 'none'; 
+        }
+        drawWebGL();    
+        drawOverlays(); 
+
+    } catch (error) {
+        console.error("Error during WebGL update/draw:", error, error.stack);
+        // alert("WebGL drawing error occurred. Check console."); // Optional: uncomment for user alert
+    }
+
+    requestAnimationFrame(update); 
+}
+
+
+// --- Global Event Listeners ---
+window.addEventListener('resize', resizeCanvas);
+window.addEventListener('DOMContentLoaded', init);
+console.log("DOMContentLoaded event listener attached.");
+
+// Main thread
+const physicsWorker = new Worker('physics.js');
+physicsWorker.onmessage = (e) => {
+  particles = e.data.particles;
+  requestAnimationFrame(render);
+};
+
+// Worker thread handles all physics calculations

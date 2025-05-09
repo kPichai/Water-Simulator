@@ -1,0 +1,35 @@
+body {
+    margin: 0;
+    overflow: hidden; /* Prevent scrollbars */
+    background-color: #1a1a2e; /* Dark background */
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+}
+
+canvas {
+    display: block;
+    position: absolute; /* Position canvases on top of each other */
+    top: 5%; /* Adjust positioning as needed */
+    left: 5%;
+    width: 90%; /* Use CSS for display size */
+    height: 90%;
+    background-color: transparent; /* Make overlay canvas transparent */
+}
+
+#webglCanvas {
+    z-index: 0; /* WebGL canvas behind */
+    background-color: #0f0f1a; /* Background for the simulation area */
+}
+
+#overlayCanvas {
+    z-index: 1; /* Overlay canvas on top */
+    pointer-events: none; /* Allow clicks to pass through to WebGL canvas if needed, though interaction is handled via JS */
+}
+
+/* Ensure parent container respects canvas size if needed */
+html, body {
+    width: 100%;
+    height: 100%;
+}
