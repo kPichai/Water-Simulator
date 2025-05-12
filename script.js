@@ -45,14 +45,18 @@ function isInvalid(val) {
 }
 
 // --- Configuration (Constants & Tunable Variables) ---
-const NUM_PARTICLES = 1000; // Keep or adjust based on performance
-const PARTICLE_RADIUS = 22;
+const MIN_PARTICLES = 100; // Minimum number of particles
+const MAX_PARTICLES = 5000; // Maximum number of particles for buffer allocation
+const DEFAULT_PARTICLES = 1000; // Default particle count
+let NUM_PARTICLES = DEFAULT_PARTICLES; // This will be controlled by the slider
+
+const PARTICLE_RADIUS = 25;
 const MIN_PARTICLE_DISTANCE = PARTICLE_RADIUS; // Minimum separation
 const MIN_PARTICLE_DISTANCE_SQ = MIN_PARTICLE_DISTANCE * MIN_PARTICLE_DISTANCE;
 // --- Visual Adjustments --- (Near other constants)
 const PARTICLE_DRAW_SIZE = 25 * window.devicePixelRatio; // Example size (TUNABLE)
 const FOAM_PARTICLE_DRAW_SIZE = 5.0 * window.devicePixelRatio; // Example size (TUNABLE)
-const INITIAL_SPACING = PARTICLE_RADIUS * 1.8; // Base H on this spacing
+const INITIAL_SPACING = PARTICLE_RADIUS * 2; // Base H on this spacing
 const H = INITIAL_SPACING * 2.0; // Slightly larger H relative to spacing might help stability
 const H_SQ = H * H;
 
@@ -86,10 +90,10 @@ let VISCOSITY_COEFFICIENT = 0.05; // Standard Viscosity (e.g., 0.05 - 0.2) - Use
 const GRAVITY = 9.8 * 100; // TUNABLE (e.g., 50 - 100)
 
 // Boundary Parameters - Make them softer
-const BOUNDARY_FORCE = 500000000; // TUNABLE: Lower repulsive force (e.g., 200 - 600)
-const BOUNDARY_DISTANCE = PARTICLE_RADIUS * 1;
-const FRICTION = 0.2; // TUNABLE: Higher friction (e.g., 0.5 - 0.9)
-const RESTITUTION = 0.02; // TUNABLE: Very low bounce (e.g., 0.0 - 0.1)
+const BOUNDARY_FORCE = 100000000; // TUNABLE: Increased repulsive force
+const BOUNDARY_DISTANCE = PARTICLE_RADIUS * 1.1; // Increased boundary distance
+const FRICTION = 0.05; // TUNABLE: Lower friction for less sticking
+const RESTITUTION = 0.3; // TUNABLE: Higher bounce to prevent sticking
 
 // --- Simulation Parameters (Tunable in 'integrate' function) ---
 // DAMPING_FACTOR: Global velocity damping (helps settling) - Tune in integrate()
@@ -118,10 +122,9 @@ const NORMAL_STRENGTH = 1.8; // Slightly increased for better visibility
 
 // --- Water Colors ---
 const VELOCITY_COLOR = { // TUNABLE
-    slow: 'rgba(40, 110, 175, 0.95)',   // Deeper blue base
-    medium: 'rgba(65, 195, 120, 0.9)',   // Green for medium velocity (changed from blue)
-    fast: 'rgba(240, 120, 50, 0.85)',    // Orange-red for high velocity (changed from light blue)
-    highlight: 'rgba(255, 230, 180, 0.7)' // Highlight color
+    slow: 'rgba(20, 50, 120, 0.95)',    // Darkish blue for slow
+    medium: 'rgba(100, 150, 220, 0.9)', // Medium blue
+    fast: 'rgba(230, 240, 255, 0.85)'   // Near white for fast
 };
 const MAX_VELOCITY_COLOR = 500; // TUNABLE: Adjust based on observed velocities
 
@@ -154,7 +157,8 @@ let currentColorMode = COLOR_MODE.DEPTH; // Default to depth coloring
 // --- Foam Constants ---
 const FOAM_LIFESPAN = 1.8; // TUNABLE: How long foam particles last (seconds)
 const FOAM_SPAWN_VELOCITY_THRESHOLD = 500; // TUNABLE: Minimum particle velocity to spawn foam
-const MAX_FOAM_PARTICLES = 1500; // TUNABLE: Max number of foam particles
+const FOAM_PARTICLE_MULTIPLIER = 3; // Number of foam particles per water particle
+let MAX_FOAM_PARTICLES = NUM_PARTICLES * FOAM_PARTICLE_MULTIPLIER; // Dynamic max foam particles
 
 // --- Surface Ripple Constants ---
 const RIPPLE_AMPLITUDE = 2.5; // Balanced ripple height
@@ -429,6 +433,9 @@ function setupSliders() {
     setupToggleIndicators();
     
     console.log("Slider event listeners attached.");
+    
+    // Add particle count slider
+    setupParticleCountSlider();
 }
 
 // Initialize and configure the toggle state indicators
@@ -551,7 +558,7 @@ function init() {
 
     // --- Setup UI Controls ---
     setupSliders(); // Initialize sliders and listeners
-
+    
     // --- CRITICAL ORDER ---
     resizeCanvas(); // 1. Resize first
     console.log("resizeCanvas completed.");
@@ -563,7 +570,7 @@ function init() {
     console.log("Event handlers setup completed.");
 
     // Initialize buffers
-    particlePositions = new Float32Array(NUM_PARTICLES * 2);
+    particlePositions = new Float32Array(MAX_PARTICLES * 2); // Use MAX_PARTICLES for buffer capacity
     foamPositions = new Float32Array(MAX_FOAM_PARTICLES * 2); // Ensure foam buffer created
     foamColors = new Float32Array(MAX_FOAM_PARTICLES * 4); // RGBA for each foam particle
 
@@ -576,9 +583,7 @@ function init() {
 
 function spawnParticles() {
     particles = [];
-    foamParticles = []; // Clear foam objects
-    activeFoamCount = 0; // Reset foam count
-
+    
     // Use tank dimensions for spawning checks if they are validly calculated
     const useTank = tankWidth > 0 && tankHeight > 0;
     // Define the area where particles will be initially placed
@@ -649,20 +654,13 @@ function spawnParticles() {
          console.warn("No particles spawned.");
     }
 
-
-    // Initialize foam buffer with empty data (important for bufferSubData later)
-     if (gl && foamPositionBuffer && MAX_FOAM_PARTICLES > 0) {
-        gl.bindBuffer(gl.ARRAY_BUFFER, foamPositionBuffer);
-        // Allocate buffer size for maximum foam particles
-        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(MAX_FOAM_PARTICLES * 2), gl.DYNAMIC_DRAW);
-        gl.bindBuffer(gl.ARRAY_BUFFER, null);
-    }
-
-    // Initialize foam color buffer with empty data
-    if (gl && foamColorBuffer && MAX_FOAM_PARTICLES > 0) {
-        gl.bindBuffer(gl.ARRAY_BUFFER, foamColorBuffer);
-        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(MAX_FOAM_PARTICLES * 4), gl.DYNAMIC_DRAW); // RGBA
-        gl.bindBuffer(gl.ARRAY_BUFFER, null);
+    // Initialize foam system
+    if (enableFoam) {
+        initFoamParticles(NUM_PARTICLES * FOAM_PARTICLE_MULTIPLIER);
+    } else {
+        // Clear foam system if foam is disabled
+        foamParticles = [];
+        activeFoamCount = 0;
     }
 
     console.log(`Spawned ${particles.length} particles within tank area.`);
@@ -1249,12 +1247,13 @@ function applyConstraints() {
     const restitution = Math.max(0, Math.min(1, RESTITUTION)); // Ensure 0 <= restitution <= 1
     const foamSpawnThresholdSq = FOAM_SPAWN_VELOCITY_THRESHOLD * FOAM_SPAWN_VELOCITY_THRESHOLD;
     const minParticleDistSq = MIN_PARTICLE_DISTANCE_SQ; // Local constant for check
-    const minParticleDist = MIN_PARTICLE_DISTANCE;     // Local constant for correction
+    const minParticleDist = MIN_PARTICLE_DISTANCE * 1.05; // Slightly increased minimum distance
     
     // Enhanced foam spawning: track turbulence areas - only if foam is enabled
     const turbulenceMap = enableFoam ? {} : null;
     const cellSize = H * 1.5; // Slightly larger than the particle interaction radius
     
+    // First pass: Apply particle-particle separation with stronger correction
     for (let i = 0; i < particles.length; i++) {
         const p = particles[i];
         // Check particle state before applying constraints
@@ -1262,6 +1261,67 @@ function applyConstraints() {
             console.warn(`Skipping constraints for particle ${i} due to invalid state.`);
             continue;
         }
+        
+        // Apply particle-particle separation with stronger correction
+        if (p.neighbors && minParticleDistSq > 0) {
+            for (const N of p.neighbors) {
+                const n = N.particle;
+                if (isInvalid(n.x) || isInvalid(n.y)) continue; // Skip invalid neighbors
+
+                const dx = n.x - p.x;
+                const dy = n.y - p.y;
+                const distSq = dx * dx + dy * dy;
+
+                // Check for overlap with stricter distance requirement
+                if (distSq < minParticleDistSq && distSq > 1e-12) {
+                    const dist = Math.sqrt(distSq);
+                    const overlap = minParticleDist - dist;
+                    
+                    // Calculate normalized direction vector (p to n)
+                    const nx = dx / dist;
+                    const ny = dy / dist;
+                    
+                    // Stronger correction (was 0.5)
+                    const correctionFactor = 0.75;
+                    const correctionAmount = overlap * correctionFactor;
+                    
+                    // Apply position correction
+                    p.x -= nx * correctionAmount * 0.5;
+                    p.y -= ny * correctionAmount * 0.5;
+                    n.x += nx * correctionAmount * 0.5;
+                    n.y += ny * correctionAmount * 0.5;
+                    
+                    // Apply velocity correction to prevent re-collision
+                    const p_vn = p.vx * nx + p.vy * ny; // Projected velocity along normal
+                    const n_vn = n.vx * nx + n.vy * ny;
+                    
+                    // If particles are moving toward each other
+                    if (p_vn - n_vn < 0) {
+                        // Calculate impulse based on relative velocity along normal
+                        const impulse = (p_vn - n_vn) * 0.6; // Stronger impulse (was 0.5)
+                        
+                        // Apply impulse with stronger factor (was 0.1)
+                        p.vx -= nx * impulse * 0.25;
+                        p.vy -= ny * impulse * 0.25;
+                        n.vx += nx * impulse * 0.25;
+                        n.vy += ny * impulse * 0.25;
+                        
+                        // Remove random jitter
+                    }
+                }
+            }
+        }
+    }
+    
+    // Second pass: Apply boundary constraints after particle-particle separation
+    for (let i = 0; i < particles.length; i++) {
+        const p = particles[i];
+        // Check particle state again
+        if (isInvalid(p.x) || isInvalid(p.y) || isInvalid(p.vx) || isInvalid(p.vy)) {
+            continue;
+        }
+        
+        let positionCorrected = false; // Add the missing variable declaration for position correction tracking
         
         // Accumulate turbulence in grid cells for foam generation - only if foam is enabled
         if (enableFoam && turbulenceMap) {
@@ -1300,58 +1360,9 @@ function applyConstraints() {
             }
         }
 
-        let positionCorrected = false; // Flag if position was changed by particle separation
-        // --- Particle-Particle Minimum Distance Enforcement ---
-        // Iterate through neighbors found in the physics step
-        // NOTE: This simple pairwise correction isn't perfectly physically accurate
-        // and can introduce some energy/jitter, but prevents overlap.
-        if (p.neighbors && minParticleDistSq > 0) {
-            for (const N of p.neighbors) {
-                const n = N.particle;
-                // Check only pairs where p's index is less than n's index to avoid double correction?
-                // This is complex with neighbor lists. Let's correct both ways for now, it might average out.
-                if (isInvalid(n.x) || isInvalid(n.y)) continue; // Skip invalid neighbors
-
-                const dx = n.x - p.x;
-                const dy = n.y - p.y;
-                const distSq = dx * dx + dy * dy;
-
-                // Check for overlap (distSq < minRequiredDistSq and distSq is not zero)
-                if (distSq < minParticleDistSq && distSq > 1e-12) {
-                    const dist = Math.sqrt(distSq);
-                    const overlap = minParticleDist - dist;
-                    // Calculate normalized direction vector (p to n)
-                    const nx = dx / dist;
-                    const ny = dy / dist;
-                    // Move particles apart by half the overlap distance each
-                    const correctionAmount = overlap * 0.5; // Push each particle by half
-                    p.x -= nx * correctionAmount;
-                    p.y -= ny * correctionAmount;
-                    n.x += nx * correctionAmount;
-                    n.y += ny * correctionAmount;
-                    positionCorrected = true;
-
-                    // Optional: Dampen velocity along the collision normal slightly?
-                    // This helps reduce energy introduced by the position correction.
-                    // Project velocities onto normal
-                    const p_vn = p.vx * nx + p.vy * ny;
-                    const n_vn = n.vx * nx + n.vy * ny;
-                    // Calculate impulse magnitude (simplified) - just remove relative normal velocity
-                    const impulse = (p_vn - n_vn) * 0.5; // Reduce relative normal velocity
-                    if (!isInvalid(impulse)) {
-                        p.vx -= nx * impulse * 0.1; // Apply small impulse correction
-                        p.vy -= ny * impulse * 0.1;
-                        n.vx += nx * impulse * 0.1;
-                        n.vy += ny * impulse * 0.1;
-                    }
-                }
-            }
-        }
-        // --- End Particle-Particle Enforcement ---
-
         let boundaryCollided = false;
         // Use the visual radius for boundary collision to prevent drawing outside tank
-        const visualRadius = PARTICLE_DRAW_SIZE / 2;
+        const visualRadius = (PARTICLE_RADIUS + 0.5) * 1.2; // Slightly increased radius for boundaries
         let collisionSpeed = 0; // Track speed at collision for foam spawning
         let preCollisionVx = p.vx; // Store velocity before potential modification by boundary collision response
         let preCollisionVy = p.vy;
@@ -1361,10 +1372,11 @@ function applyConstraints() {
         // Left Wall
         if (p.x < minX + visualRadius) {
             collisionSpeed = Math.abs(p.vx); // Use absolute velocity for speed check
-            p.x = minX + visualRadius; // Correct position to be just inside boundary
+            p.x = minX + visualRadius; // Remove random offset
+            positionCorrected = true; // Mark that position was corrected
             if (p.vx < 0) { // Only apply response if moving into the wall
                  p.vy *= frictionFactor; // Apply friction to perpendicular velocity
-                 p.vx *= -restitution; // Apply restitution to normal velocity
+                 p.vx = Math.abs(p.vx) * restitution; // Ensure velocity is outward
                  boundaryCollided = true;
                  collisionNormal = { x: 1, y: 0 }; // Normal pointing right
             }
@@ -1372,10 +1384,11 @@ function applyConstraints() {
         // Right Wall
         else if (p.x > maxX - visualRadius) {
             collisionSpeed = Math.abs(p.vx);
-            p.x = maxX - visualRadius;
+            p.x = maxX - visualRadius; // Remove random offset
+            positionCorrected = true; // Mark that position was corrected
             if (p.vx > 0) {
                 p.vy *= frictionFactor;
-                p.vx *= -restitution;
+                p.vx = -Math.abs(p.vx) * restitution; // Ensure velocity is outward
                 boundaryCollided = true;
                 collisionNormal = { x: -1, y: 0 }; // Normal pointing left
             }
@@ -1384,10 +1397,11 @@ function applyConstraints() {
         // Top Wall (check AFTER X correction)
         if (p.y < minY + visualRadius) {
             collisionSpeed = Math.max(collisionSpeed, Math.abs(p.vy)); // Use max speed if hitting corner
-            p.y = minY + visualRadius;
+            p.y = minY + visualRadius; // Remove random offset
+            positionCorrected = true; // Mark that position was corrected
             if (p.vy < 0) {
                 p.vx *= frictionFactor; // Apply friction to perpendicular velocity
-                p.vy *= -restitution; // Apply restitution to normal velocity
+                p.vy = Math.abs(p.vy) * restitution; // Ensure velocity is downward
                 boundaryCollided = true;
                 collisionNormal = { x: 0, y: 1 }; // Normal pointing down
             }
@@ -1395,16 +1409,16 @@ function applyConstraints() {
         // Bottom Wall (check AFTER X correction)
         else if (p.y > maxY - visualRadius) {
             collisionSpeed = Math.max(collisionSpeed, Math.abs(p.vy));
-            p.y = maxY - visualRadius;
+            p.y = maxY - visualRadius; // Remove random offset
+            positionCorrected = true; // Mark that position was corrected
             if (p.vy > 0) {
                 p.vx *= frictionFactor;
-                p.vy *= -restitution;
+                p.vy = -Math.abs(p.vy) * restitution; // Ensure velocity is upward
                 boundaryCollided = true;
                 collisionNormal = { x: 0, y: -1 }; // Normal pointing up
             }
         }
         // --- End boundary checks ---
-
 
         // Check velocity is still valid after collision response
         if(isInvalid(p.vx) || isInvalid(p.vy)){
@@ -2704,3 +2718,179 @@ function applyLighting(color, normal, posX, posY) {
     
     return `rgba(${lightR}, ${lightG}, ${lightB}, ${a})`;
 }
+
+// --- UI Elements (Add particle count slider) ---
+function setupParticleCountSlider() {
+    // Check if particle slider already exists
+    const existingSlider = document.getElementById('particle-count-slider');
+    if (existingSlider) {
+        console.log("Particle slider already exists, not creating a duplicate");
+        return existingSlider;
+    }
+    
+    // Look for a container that might hold the sliders
+    let controlsContainer = document.querySelector('.slider-container')?.parentElement;
+    
+    // If we couldn't find one based on existing sliders, try some common IDs/classes
+    if (!controlsContainer) {
+        controlsContainer = document.getElementById('simulation-controls') || 
+                           document.getElementById('controls') ||
+                           document.querySelector('.controls');
+    }
+    
+    // If still no container, append to the body as fallback
+    if (!controlsContainer) {
+        console.warn("Could not find controls container, adding particle slider to body");
+        controlsContainer = document.body;
+    }
+    
+    // Create the particle count slider container
+    const sliderContainer = document.createElement('div');
+    sliderContainer.className = 'slider-container';
+    
+    // Create the label
+    const label = document.createElement('label');
+    label.textContent = 'Particles: ';
+    label.htmlFor = 'particle-count-slider';
+    
+    // Create the value display span
+    const valueDisplay = document.createElement('span');
+    valueDisplay.id = 'particle-count-value';
+    valueDisplay.textContent = DEFAULT_PARTICLES;
+    
+    // Append label and value display
+    label.appendChild(valueDisplay);
+    sliderContainer.appendChild(label);
+    
+    // Create the slider
+    const slider = document.createElement('input');
+    slider.type = 'range';
+    slider.id = 'particle-count-slider';
+    slider.min = MIN_PARTICLES;
+    slider.max = MAX_PARTICLES;
+    slider.step = 100;
+    slider.value = DEFAULT_PARTICLES;
+    slider.className = 'slider'; // Add slider class to match styling of other sliders
+    
+    // Add event listener
+    slider.addEventListener('input', (e) => {
+        updateParticleCount(parseInt(e.target.value, 10));
+    });
+    
+    // Append slider
+    sliderContainer.appendChild(slider);
+    
+    // Add to controls container
+    controlsContainer.appendChild(sliderContainer);
+    
+    // Log for debugging
+    console.log("Particle count slider added to", controlsContainer);
+    
+    return slider;
+}
+
+// Add a new function to handle particle count changes
+function updateParticleCount(value) {
+    const previousCount = NUM_PARTICLES;
+    NUM_PARTICLES = Math.max(MIN_PARTICLES, Math.min(MAX_PARTICLES, Math.round(value)));
+    
+    // Update the display
+    document.getElementById('particle-count-value').textContent = NUM_PARTICLES;
+    
+    // If the count has changed, reinitialize particles
+    if (NUM_PARTICLES !== previousCount) {
+        // Only reinitialize if simulation is already running
+        if (particles.length > 0) {
+            // Store tank state for re-use
+            const currentTankSettings = {
+                width: tankWidth,
+                height: tankHeight,
+                x: tankX,
+                y: tankY
+            };
+            
+            // Clear existing particles
+            particles = [];
+            foamParticles = [];
+            activeFoamCount = 0;
+            
+            // Reinitialize particles
+            spawnParticles();
+        }
+    }
+}
+
+// Function to initialize foam system
+function initFoamParticles(count) {
+    // Reset foam system
+    foamParticles = [];
+    activeFoamCount = 0;
+    
+    // Pre-allocate maximum foam particles buffer
+    MAX_FOAM_PARTICLES = count;
+    
+    // Allocate empty foam particles array
+    foamParticles = new Array(MAX_FOAM_PARTICLES).fill(null);
+    
+    // Initialize WebGL buffers for foam
+    if (gl) {
+        // Foam position buffer
+        if (!foamPositionBuffer) {
+            foamPositionBuffer = gl.createBuffer();
+        }
+        gl.bindBuffer(gl.ARRAY_BUFFER, foamPositionBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(MAX_FOAM_PARTICLES * 2), gl.DYNAMIC_DRAW);
+        
+        // Foam color buffer
+        if (!foamColorBuffer) {
+            foamColorBuffer = gl.createBuffer();
+        }
+        gl.bindBuffer(gl.ARRAY_BUFFER, foamColorBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(MAX_FOAM_PARTICLES * 4), gl.DYNAMIC_DRAW); // RGBA
+        
+        gl.bindBuffer(gl.ARRAY_BUFFER, null);
+    }
+    
+    console.log(`Initialized foam system with capacity for ${MAX_FOAM_PARTICLES} particles`);
+}
+
+// Function to set up a slider with standardized handling
+function setupSlider(sliderId, initialValue, min, max, updateCallback) {
+    const slider = document.getElementById(sliderId);
+    // If slider element doesn't exist in the DOM yet, it might be our particle count slider
+    // that will be added dynamically
+    if (!slider) return;
+    
+    // Find or create the value display element
+    let valueDisplay = document.getElementById(`${sliderId}-value`);
+    if (!valueDisplay) {
+        valueDisplay = document.getElementById(`${sliderId.replace('-slider', '')}-value`);
+    }
+    
+    // Set initial values
+    slider.min = min;
+    slider.max = max;
+    slider.value = initialValue;
+    
+    // Update display if it exists
+    if (valueDisplay) {
+        valueDisplay.textContent = initialValue;
+    }
+    
+    // Add event listener
+    slider.addEventListener('input', (e) => {
+        const value = parseFloat(e.target.value);
+        if (valueDisplay) {
+            // Format to fixed decimal places for floating point values
+            valueDisplay.textContent = Number.isInteger(value) ? value : value.toFixed(2);
+        }
+        // Call the specific update function for this slider
+        if (updateCallback) {
+            updateCallback(value);
+        }
+    });
+    
+    return slider;
+}
+
+// --- UI Setup ---
