@@ -90,7 +90,7 @@ let VISCOSITY_COEFFICIENT = 0.05; // Standard Viscosity (e.g., 0.05 - 0.2) - Use
 const GRAVITY = 9.8 * 100; // TUNABLE (e.g., 50 - 100)
 
 // Boundary Parameters - Make them softer
-const BOUNDARY_FORCE = 100000000; // TUNABLE: Increased repulsive force
+const BOUNDARY_FORCE = 1000000; // TUNABLE: Increased repulsive force
 const BOUNDARY_DISTANCE = PARTICLE_RADIUS * 1.1; // Increased boundary distance
 const FRICTION = 0.05; // TUNABLE: Lower friction for less sticking
 const RESTITUTION = 0.3; // TUNABLE: Higher bounce to prevent sticking
@@ -156,7 +156,7 @@ let currentColorMode = COLOR_MODE.DEPTH; // Default to depth coloring
 
 // --- Foam Constants ---
 const FOAM_LIFESPAN = 1.8; // TUNABLE: How long foam particles last (seconds)
-const FOAM_SPAWN_VELOCITY_THRESHOLD = 500; // TUNABLE: Minimum particle velocity to spawn foam
+const FOAM_SPAWN_VELOCITY_THRESHOLD = 800; // TUNABLE: Minimum particle velocity to spawn foam
 const FOAM_PARTICLE_MULTIPLIER = 3; // Number of foam particles per water particle
 let MAX_FOAM_PARTICLES = NUM_PARTICLES * FOAM_PARTICLE_MULTIPLIER; // Dynamic max foam particles
 
