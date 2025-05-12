@@ -36,13 +36,6 @@ This project is a real-time 2D water simulation that demonstrates fluid dynamics
     - Tait B (Stiffness): Adjust the stiffness of the fluid.
     - Substeps: Adjust the number of physics sub-steps per frame.
     - Viscosity: Adjust the viscosity of the fluid.
-- **Toggle Indicators (Clickable):**
-    - Metaballs: Toggle smooth surface rendering.
-    - Velocity: Toggle velocity-based coloring mode.
-    - Foam: Toggle foam generation.
-    - Lighting: Toggle lighting on the metaball surface.
-    - Depth: Toggle depth-based coloring mode.
-    - Waves: Toggle surface ripple effect.
 - **Performance Statistics Display:** Shows FPS, particle count, average velocity, and average density.
 
 ## Technical Details
