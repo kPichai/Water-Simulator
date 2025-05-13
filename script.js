@@ -159,21 +159,6 @@ const FOAM_LIFESPAN = 1.8; // TUNABLE: How long foam particles last (seconds)
 const FOAM_SPAWN_VELOCITY_THRESHOLD = 500; // TUNABLE: Minimum particle velocity to spawn foam
 const FOAM_PARTICLE_MULTIPLIER = 3; // Number of foam particles per water particle
 let MAX_FOAM_PARTICLES = NUM_PARTICLES * FOAM_PARTICLE_MULTIPLIER; // Dynamic max foam particles
-const foamSpawnThresholdSq = FOAM_SPAWN_VELOCITY_THRESHOLD * FOAM_SPAWN_VELOCITY_THRESHOLD; // Squared threshold for performance
-
-// Foam system configuration 
-const FOAM_CONFIG = {
-    VELOCITY_GRADIENT_THRESHOLD: 150,  // Increased minimum threshold (was 100)
-    CURVATURE_THRESHOLD: 0.5,          // Increased threshold (was 0.3)
-    PERSISTENCE_FACTOR: 0.95,          // How long foam persists (0-1)
-    MAX_FOAM_AGE: 5.0,                 // Maximum age of foam particles
-    MIN_FOAM_AGE: 0.5,                 // Minimum age of foam particles
-    FOAM_SPAWN_RADIUS: 2.0,            // Radius around particle for foam spawn
-    VELOCITY_INFLUENCE: 0.3,           // How much particle velocity affects foam
-    TURBULENCE_SCALE: 0.8,             // Increased threshold (was 0.5)
-    BOUNDARY_BOOST: 1.5,               // Extra foam generation near boundaries
-    COLOR_TRANSITION_TIME: 0.3         // Time for foam color transition
-};
 
 // --- Surface Ripple Constants ---
 const RIPPLE_AMPLITUDE = 2.5; // Balanced ripple height
@@ -188,7 +173,6 @@ let foamParticles = []; // Stores foam particle objects {x, y, vx, vy, life}
 let foamPositions = null; // Stores flat [x1,y1, x2,y2,...] for WebGL buffer
 let foamColors = null; // Stores flat [r1,g1,b1,a1, r2,g2,b2,a2,...] for WebGL buffer
 let activeFoamCount = 0; // Number of active foam particles
-let turbulenceMap = {}; // Maps regions to turbulence values
 let grid = {};
 let gridCellSize = H; // Grid cell size based on H
 let mouse = { x: -1000, y: -1000, leftDown: false, rightDown: false };
@@ -251,20 +235,10 @@ function createParticle(x, y) {
 }
 
 // --- Foam Particle Creation ---
-function createFoamParticle(x, y, vx, vy, type = 'normal') {
-    const baseLife = FOAM_LIFESPAN * (0.8 + Math.random() * 0.4);
-    const life = type === 'boundary' ? baseLife * 1.2 : baseLife;
-    
+function createFoamParticle(x, y, vx, vy) {
     return {
-        x: x, y: y,
-        vx: vx, vy: vy,
-        life: life,
-        maxLife: life,
-        type: type,
-        age: 0,
-        turbulence: 0,
-        color: { r: 1.0, g: 1.0, b: 1.0, a: 0.9 },
-        targetColor: { r: 1.0, g: 1.0, b: 1.0, a: 0.9 }
+        x: x, y: y, vx: vx, vy: vy,
+        life: FOAM_LIFESPAN * (0.8 + Math.random() * 0.4) // Add some randomness to life
     };
 }
 
@@ -872,95 +846,62 @@ function setupKeyboardControls() {
 
 
 // --- Spatial Grid ---
-// Simple grid-based neighbor search system
-// Note: 'grid' is already declared at the simulation state section, no need to redeclare
-
-function getGridCoords(x, y) {
-    return {
-        cellX: Math.floor(x / gridCellSize),
-        cellY: Math.floor(y / gridCellSize)
-    };
-}
-
-function getCellKey(cellX, cellY) {
-    return `${cellX},${cellY}`;
-}
+function getGridCoords(x, y) { const cellSize = Math.max(1, gridCellSize); return { col: Math.floor(x / cellSize), row: Math.floor(y / cellSize) }; }
+function hashCoords(col, row) { return `${Math.max(0, col)},${Math.max(0, row)}`; } // Prevent negative indices
 
 function updateGrid() {
-    if (!canvas || particles.length === 0) return;
-    
-    // Clear grid before repopulating
-    grid = {};
-    
-    // Add particles to grid
+    grid = {}; // Clear grid
+    if (!canvas || particles.length === 0) return; // No grid needed if no particles/canvas
+    const width = canvas.width; const height = canvas.height;
+
     for (let i = 0; i < particles.length; i++) {
         const p = particles[i];
-        if (isInvalid(p.x) || isInvalid(p.y)) {
-            console.warn(`Invalid particle position before grid update (particle ${i}), resetting.`);
-            Object.assign(p, createParticle(canvas.width / 2, canvas.height / 5));
-            if (i * 2 + 1 < particlePositions.length) {
+        // Check for invalid particle state before using position
+        if (isInvalid(p.x) || isInvalid(p.y)){
+             console.warn(`Invalid particle position before grid update (particle ${i}), resetting.`);
+             Object.assign(p, createParticle(width / 2, height / 5)); // Reset state
+             // Immediately update buffer for reset particle
+             if (i * 2 + 1 < particlePositions.length) {
                 particlePositions[i * 2] = p.x;
                 particlePositions[i * 2 + 1] = p.y;
-            }
-            continue;
+             }
+             continue; // Skip grid insertion for reset particle this frame
         }
-        
-        // Get grid cell for this particle
-        const { cellX, cellY } = getGridCoords(p.x, p.y);
-        const key = getCellKey(cellX, cellY);
-        
-        // Add particle to grid cell
-        if (!grid[key]) {
-            grid[key] = [];
-        }
-        grid[key].push(p);
-        
-        // Clear old neighbors list
-        p.neighbors = [];
+        const coords = getGridCoords(p.x, p.y);
+        const hash = hashCoords(coords.col, coords.row);
+        if (!grid[hash]) grid[hash] = [];
+        grid[hash].push(p);
+        p.neighbors = []; // Clear old neighbors list for this particle
     }
 }
 
 function getNeighbors(particle) {
-    if (!particle || isInvalid(particle.x) || isInvalid(particle.y) || !H_SQ || H_SQ <= 0) {
-        particle.neighbors = [];
-        return;
-    }
-    
     const neighbors = [];
-    const { cellX, cellY } = getGridCoords(particle.x, particle.y);
-    const radius = Math.ceil(H / gridCellSize);
-    
-    // Check surrounding cells (including current cell)
-    for (let offsetX = -radius; offsetX <= radius; offsetX++) {
-        for (let offsetY = -radius; offsetY <= radius; offsetY++) {
-            const neighborKey = getCellKey(cellX + offsetX, cellY + offsetY);
-            const cellParticles = grid[neighborKey];
-            
-            if (cellParticles) {
-                for (const other of cellParticles) {
-                    if (other === particle) continue;
-                    if (!other || isInvalid(other.x) || isInvalid(other.y)) continue;
-                    
+    if (!H_SQ || H_SQ <= 0) { particle.neighbors = neighbors; return; } // Need valid smoothing radius
+
+    const centerCoords = getGridCoords(particle.x, particle.y);
+
+    for (let dCol = -1; dCol <= 1; dCol++) {
+        for (let dRow = -1; dRow <= 1; dRow++) {
+            const hash = hashCoords(centerCoords.col + dCol, centerCoords.row + dRow);
+            if (grid[hash]) {
+                for (const other of grid[hash]) {
+                    if (other === particle) continue; // Don't compare particle to itself
+
                     const dx = other.x - particle.x;
                     const dy = other.y - particle.y;
                     const distSq = dx * dx + dy * dy;
-                    
+
+                    // Check if within smoothing radius and not exactly coincident
                     if (distSq < H_SQ && distSq > 1e-12) {
                         const dist = Math.sqrt(distSq);
-                        neighbors.push({
-                            particle: other,
-                            distSq: distSq,
-                            dx: dx,
-                            dy: dy,
-                            dist: dist
-                        });
+                        neighbors.push({ particle: other, distSq: distSq, dx: dx, dy: dy, dist: dist });
                     }
                 }
             }
         }
     }
-    
-    particle.neighbors = neighbors;
+    particle.neighbors = neighbors; // Assign the found neighbors
 }
 
 
@@ -1168,22 +1109,19 @@ function applyForces(sub_dt) {
 
 // --- Integration & Constraints ---
 function integrate(sub_dt) {
-    // Cap sub-timestep to prevent instability
-    const safe_dt = Math.min(sub_dt, 0.016); // Max 16ms per substep for stability
-    
     // Max velocity based on canvas size (can be tuned)
-    const MAX_VELOCITY = canvas ? Math.max(canvas.width, canvas.height) * 0.5 : 500; // Reduced for stability
+    const MAX_VELOCITY = canvas ? Math.max(canvas.width, canvas.height) * 0.8 : 800; // Increased slightly
     const MAX_VELOCITY_SQ = MAX_VELOCITY * MAX_VELOCITY;
 
     // --- Define Damping Factor ---
     // TUNABLE: Global velocity damping (0.0001 to 0.005). Helps settling.
-    const DAMPING_FACTOR = 0.002; // Increased for better stability
+    const DAMPING_FACTOR = 0.001; // Keep low to avoid sluggishness
     const dampingMultiplier = 1.0 - DAMPING_FACTOR;
     // ---
 
     // --- Define XSPH Coefficient ---
     // TUNABLE: XSPH Viscosity (0.005 to 0.05). Reduces jitter.
-    const XSPH_C = 0.02; // Increased for better stability
+    const XSPH_C = 0.01;
     // ---
 
     for (let i = 0; i < particles.length; i++) {
@@ -1194,8 +1132,9 @@ function integrate(sub_dt) {
              p.ax = 0; p.ay = 0;
         }
 
-        // Acceleration clamping - reduced max to improve stability
-        const maxAcc = 100.0 * Math.abs(GRAVITY) + 80000;
+        // Optional: Acceleration clamping (can help prevent extreme forces)
+        // Increase max acceleration allowed
+        const maxAcc = 150.0 * Math.abs(GRAVITY) + 150000;
         const accMagSq = p.ax * p.ax + p.ay * p.ay;
         if (accMagSq > maxAcc * maxAcc) {
             const accMag = Math.sqrt(accMagSq);
@@ -1208,8 +1147,8 @@ function integrate(sub_dt) {
         }
 
         // Semi-implicit Euler integration: Update velocity based on acceleration
-        p.vx += p.ax * safe_dt;
-        p.vy += p.ay * safe_dt;
+        p.vx += p.ax * sub_dt;
+        p.vy += p.ay * sub_dt;
 
         // --- Calculate and Apply XSPH Correction ---
         let xsph_vx_correction = 0;
@@ -1226,17 +1165,11 @@ function integrate(sub_dt) {
                      xsph_vy_correction += (n.vy - p.vy) * poly6_w;
                  }
              }
-             // Apply correction with additional safety clamp
-             const xsphMagSq = xsph_vx_correction * xsph_vx_correction + xsph_vy_correction * xsph_vy_correction;
-             if (xsphMagSq > MAX_VELOCITY_SQ * 0.01) {
-                 const scale = Math.sqrt(MAX_VELOCITY_SQ * 0.01 / xsphMagSq);
-                 xsph_vx_correction *= scale;
-                 xsph_vy_correction *= scale;
-             }
              p.vx += XSPH_C * xsph_vx_correction;
              p.vy += XSPH_C * xsph_vy_correction;
         }
         // --- End XSPH Correction ---
+
 
         // --- Apply Global Damping ---
         if (DAMPING_FACTOR > 0) {
@@ -1264,9 +1197,9 @@ function integrate(sub_dt) {
              p.vx = 0; p.vy = 0;
         }
 
-        // Update position based on final velocity - apply additional safety
-        let nextX = p.x + p.vx * safe_dt;
-        let nextY = p.y + p.vy * safe_dt;
+        // Update position based on final velocity
+        let nextX = p.x + p.vx * sub_dt;
+        let nextY = p.y + p.vy * sub_dt;
 
         // Check for invalid position calculation
         if(isInvalid(nextX) || isInvalid(nextY)) {
@@ -1296,168 +1229,268 @@ function integrate(sub_dt) {
 
 // --- Apply Constraints (Boundary Collisions & Foam Spawning) ---
 function applyConstraints() {
-    if (!canvas || particles.length === 0) return;
-    
-    const width = canvas.width;
-    const height = canvas.height;
-    const visualRadius = PARTICLE_DRAW_SIZE / (2 * window.devicePixelRatio);
-    const minX = visualRadius;
-    const maxX = width - visualRadius;
-    const minY = visualRadius;
-    const maxY = height - visualRadius;
+    // Define boundaries using tank dimensions if valid, otherwise fallback (shouldn't be needed if resize/spawn work)
+    const useTank = tankWidth > 0 && tankHeight > 0;
+    const minX = useTank ? tankX : 0;
+    const minY = useTank ? tankY : 0;
+    const maxX = useTank ? tankX + tankWidth : (canvas ? canvas.width : 0);
+    const maxY = useTank ? tankY + tankHeight : (canvas ? canvas.height : 0);
 
-    // Reset turbulence map for this frame
-    turbulenceMap = {};
+    // Ensure bounds are logical
+    if (maxX <= minX || maxY <= minY) {
+        console.warn("applyConstraints: Invalid tank boundaries calculated.");
+        return;
+    }
+
+    // Get physics constants
+    const frictionFactor = 1.0 - Math.max(0, Math.min(1, FRICTION));
+    const restitution = Math.max(0, Math.min(1, RESTITUTION)); // Ensure 0 <= restitution <= 1
+    const foamSpawnThresholdSq = FOAM_SPAWN_VELOCITY_THRESHOLD * FOAM_SPAWN_VELOCITY_THRESHOLD;
+    const minParticleDistSq = MIN_PARTICLE_DISTANCE_SQ; // Local constant for check
+    const minParticleDist = MIN_PARTICLE_DISTANCE;     // Local constant for correction
     
-    // Calculate foam factors for each particle
-    const foamFactors = new Map();
+    // Enhanced foam spawning: track turbulence areas - only if foam is enabled
+    const turbulenceMap = enableFoam ? {} : null;
+    const cellSize = H * 1.5; // Slightly larger than the particle interaction radius
     
     for (let i = 0; i < particles.length; i++) {
         const p = particles[i];
-        if (isInvalid(p.x) || isInvalid(p.y)) continue;
+        // Check particle state before applying constraints
+        if (isInvalid(p.x) || isInvalid(p.y) || isInvalid(p.vx) || isInvalid(p.vy)) {
+            console.warn(`Skipping constraints for particle ${i} due to invalid state.`);
+            continue;
+        }
         
-        // Calculate foam factors based on local conditions
-        const factors = calculateFoamFactors(p, p.neighbors);
-        foamFactors.set(p, factors);
-        
-        // Spawn foam based on factors (but limit foam generation to avoid excessive foam)
-        if (enableFoam && Math.random() < 0.1) { // Only 10% chance per particle to avoid too much foam
-            const shouldSpawnFoam = 
-                factors.velocityGradient > FOAM_CONFIG.VELOCITY_GRADIENT_THRESHOLD ||
-                factors.surfaceCurvature > FOAM_CONFIG.CURVATURE_THRESHOLD ||
-                factors.turbulence > FOAM_CONFIG.TURBULENCE_SCALE;
+        // Accumulate turbulence in grid cells for foam generation - only if foam is enabled
+        if (enableFoam && turbulenceMap) {
+            const velMagSq = p.vx * p.vx + p.vy * p.vy;
+            if (velMagSq > foamSpawnThresholdSq * 0.5) { // Lower threshold for turbulence tracking
+                const cellX = Math.floor(p.x / cellSize);
+                const cellY = Math.floor(p.y / cellSize);
+                const cellKey = `${cellX},${cellY}`;
                 
-            if (shouldSpawnFoam) {
-                const numFoam = Math.min(2, Math.floor(1 + factors.turbulence * 2)); // Limit max foam per particle
-                spawnFoam(p.x, p.y, p.vx, p.vy, numFoam, factors);
+                if (!turbulenceMap[cellKey]) {
+                    turbulenceMap[cellKey] = { 
+                        x: p.x, 
+                        y: p.y, 
+                        count: 0, 
+                        totalVelSq: 0,
+                        isNearBoundary: false 
+                    };
+                }
+                
+                turbulenceMap[cellKey].count++;
+                turbulenceMap[cellKey].totalVelSq += velMagSq;
+                
+                // Check if this cell is near a boundary
+                const distToLeftWall = p.x - minX;
+                const distToRightWall = maxX - p.x;
+                const distToTopWall = p.y - minY;
+                const distToBottomWall = maxY - p.y;
+                const nearBoundaryDist = H * 2; // Distance to consider "near boundary"
+                
+                if (distToLeftWall < nearBoundaryDist || 
+                    distToRightWall < nearBoundaryDist ||
+                    distToTopWall < nearBoundaryDist ||
+                    distToBottomWall < nearBoundaryDist) {
+                    turbulenceMap[cellKey].isNearBoundary = true;
+                }
             }
         }
-        
-        // Handle boundary collisions
+
+        let positionCorrected = false; // Flag if position was changed by particle separation
+        // --- Particle-Particle Minimum Distance Enforcement ---
+        // Iterate through neighbors found in the physics step
+        // NOTE: This simple pairwise correction isn't perfectly physically accurate
+        // and can introduce some energy/jitter, but prevents overlap.
+        if (p.neighbors && minParticleDistSq > 0) {
+            for (const N of p.neighbors) {
+                const n = N.particle;
+                // Check only pairs where p's index is less than n's index to avoid double correction?
+                // This is complex with neighbor lists. Let's correct both ways for now, it might average out.
+                if (isInvalid(n.x) || isInvalid(n.y)) continue; // Skip invalid neighbors
+
+                const dx = n.x - p.x;
+                const dy = n.y - p.y;
+                const distSq = dx * dx + dy * dy;
+
+                // Check for overlap (distSq < minRequiredDistSq and distSq is not zero)
+                if (distSq < minParticleDistSq && distSq > 1e-12) {
+                    const dist = Math.sqrt(distSq);
+                    const overlap = minParticleDist - dist;
+                    // Calculate normalized direction vector (p to n)
+                    const nx = dx / dist;
+                    const ny = dy / dist;
+                    // Move particles apart by half the overlap distance each
+                    const correctionAmount = overlap * 0.5; // Push each particle by half
+                    p.x -= nx * correctionAmount;
+                    p.y -= ny * correctionAmount;
+                    n.x += nx * correctionAmount;
+                    n.y += ny * correctionAmount;
+                    positionCorrected = true;
+
+                    // Optional: Dampen velocity along the collision normal slightly?
+                    // This helps reduce energy introduced by the position correction.
+                    // Project velocities onto normal
+                    const p_vn = p.vx * nx + p.vy * ny;
+                    const n_vn = n.vx * nx + n.vy * ny;
+                    // Calculate impulse magnitude (simplified) - just remove relative normal velocity
+                    const impulse = (p_vn - n_vn) * 0.5; // Reduce relative normal velocity
+                    if (!isInvalid(impulse)) {
+                        p.vx -= nx * impulse * 0.1; // Apply small impulse correction
+                        p.vy -= ny * impulse * 0.1;
+                        n.vx += nx * impulse * 0.1;
+                        n.vy += ny * impulse * 0.1;
+                    }
+                }
+            }
+        }
+        // --- End Particle-Particle Enforcement ---
+
         let boundaryCollided = false;
-        let normalX = 0, normalY = 0;
-        let collisionX = p.x, collisionY = p.y;
-        
-        // Check tank boundaries
-        if (tankWidth > 0 && tankHeight > 0) {
-            // Left wall
-            if (p.x < tankX + BOUNDARY_DISTANCE) {
-                p.x = tankX + BOUNDARY_DISTANCE;
-                p.vx = -p.vx * RESTITUTION;
-                p.vy *= (1.0 - FRICTION);
-                boundaryCollided = true;
-                normalX = 1; normalY = 0;
-                collisionX = tankX;
-            }
-            // Right wall
-            else if (p.x > tankX + tankWidth - BOUNDARY_DISTANCE) {
-                p.x = tankX + tankWidth - BOUNDARY_DISTANCE;
-                p.vx = -p.vx * RESTITUTION;
-                p.vy *= (1.0 - FRICTION);
-                boundaryCollided = true;
-                normalX = -1; normalY = 0;
-                collisionX = tankX + tankWidth;
-            }
-            // Top wall
-            if (p.y < tankY + BOUNDARY_DISTANCE) {
-                p.y = tankY + BOUNDARY_DISTANCE;
-                p.vy = -p.vy * RESTITUTION;
-                p.vx *= (1.0 - FRICTION);
-                boundaryCollided = true;
-                normalX = 0; normalY = 1;
-                collisionY = tankY;
-            }
-            // Bottom wall
-            else if (p.y > tankY + tankHeight - BOUNDARY_DISTANCE) {
-                p.y = tankY + tankHeight - BOUNDARY_DISTANCE;
-                p.vy = -p.vy * RESTITUTION;
-                p.vx *= (1.0 - FRICTION);
-                boundaryCollided = true;
-                normalX = 0; normalY = -1;
-                collisionY = tankY + tankHeight;
+        // Use the visual radius for boundary collision to prevent drawing outside tank
+        const visualRadius = PARTICLE_DRAW_SIZE / 2;
+        let collisionSpeed = 0; // Track speed at collision for foam spawning
+        let preCollisionVx = p.vx; // Store velocity before potential modification by boundary collision response
+        let preCollisionVy = p.vy;
+        let collisionNormal = { x: 0, y: 0 }; // Store collision normal for directional foam
+
+        // --- Boundary checks and response using tank boundaries ---
+        // Left Wall
+        if (p.x < minX + visualRadius) {
+            collisionSpeed = Math.abs(p.vx); // Use absolute velocity for speed check
+            p.x = minX + visualRadius; // Correct position to be just inside boundary
+            if (p.vx < 0) { // Only apply response if moving into the wall
+                 p.vy *= frictionFactor; // Apply friction to perpendicular velocity
+                 p.vx *= -restitution; // Apply restitution to normal velocity
+                 boundaryCollided = true;
+                 collisionNormal = { x: 1, y: 0 }; // Normal pointing right
             }
         }
-        
-        // Update particle position buffer after constraint application
-        if (i * 2 + 1 < particlePositions.length) {
-            particlePositions[i * 2] = p.x;
-            particlePositions[i * 2 + 1] = p.y;
-        }
-        
-        // Spawn foam on boundary collision
-        if (boundaryCollided && enableFoam) {
-            const speed = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
-            if (speed > FOAM_SPAWN_VELOCITY_THRESHOLD * 0.5) {
-                const numFoam = Math.min(3, Math.floor(speed / FOAM_SPAWN_VELOCITY_THRESHOLD));
-                spawnDirectionalFoam(collisionX, collisionY, p.vx, p.vy, normalX, normalY, numFoam);
+        // Right Wall
+        else if (p.x > maxX - visualRadius) {
+            collisionSpeed = Math.abs(p.vx);
+            p.x = maxX - visualRadius;
+            if (p.vx > 0) {
+                p.vy *= frictionFactor;
+                p.vx *= -restitution;
+                boundaryCollided = true;
+                collisionNormal = { x: -1, y: 0 }; // Normal pointing left
             }
         }
-        
-        // Add to turbulence map for additional foam generation
-        if (factors.turbulence > 0) {
-            // Create a grid cell key for this position
-            const cellSize = H * 2; // Larger cells to group particles
-            const cellX = Math.floor(p.x / cellSize);
-            const cellY = Math.floor(p.y / cellSize);
-            const cellKey = `${cellX},${cellY}`;
-            
-            // Check if this is near a boundary
-            const distFromBoundary = Math.min(
-                Math.abs(p.x - tankX),
-                Math.abs(p.x - (tankX + tankWidth)),
-                Math.abs(p.y - tankY),
-                Math.abs(p.y - (tankY + tankHeight))
-            );
-            const isNearBoundary = distFromBoundary < H * 2;
-            
-            // Initialize or update the cell
-            if (!turbulenceMap[cellKey]) {
-                turbulenceMap[cellKey] = {
-                    x: (cellX + 0.5) * cellSize,
-                    y: (cellY + 0.5) * cellSize,
-                    totalVelSq: p.vx * p.vx + p.vy * p.vy,
-                    count: 1,
-                    isNearBoundary: isNearBoundary
-                };
-            } else {
-                const cell = turbulenceMap[cellKey];
-                cell.totalVelSq += p.vx * p.vx + p.vy * p.vy;
-                cell.count++;
-                cell.isNearBoundary = cell.isNearBoundary || isNearBoundary;
+
+        // Top Wall (check AFTER X correction)
+        if (p.y < minY + visualRadius) {
+            collisionSpeed = Math.max(collisionSpeed, Math.abs(p.vy)); // Use max speed if hitting corner
+            p.y = minY + visualRadius;
+            if (p.vy < 0) {
+                p.vx *= frictionFactor; // Apply friction to perpendicular velocity
+                p.vy *= -restitution; // Apply restitution to normal velocity
+                boundaryCollided = true;
+                collisionNormal = { x: 0, y: 1 }; // Normal pointing down
             }
         }
-    }
-    
-    // Process turbulence map for additional foam spawning (but limit it)
+        // Bottom Wall (check AFTER X correction)
+        else if (p.y > maxY - visualRadius) {
+            collisionSpeed = Math.max(collisionSpeed, Math.abs(p.vy));
+            p.y = maxY - visualRadius;
+            if (p.vy > 0) {
+                p.vx *= frictionFactor;
+                p.vy *= -restitution;
+                boundaryCollided = true;
+                collisionNormal = { x: 0, y: -1 }; // Normal pointing up
+            }
+        }
+        // --- End boundary checks ---
+
+
+        // Check velocity is still valid after collision response
+        if(isInvalid(p.vx) || isInvalid(p.vy)){
+            console.warn(`Invalid velocity after constraint for particle ${i}. Resetting.`);
+            p.vx = 0; p.vy = 0;
+             // If velocity became invalid, use pre-collision velocity for foam spawn check? Or zero?
+             preCollisionVx = 0; preCollisionVy = 0;
+        }
+
+        // --- Spawn Foam - only if foam is enabled ---
+        if (enableFoam) {
+            // Spawn on significant boundary collision (check speed BEFORE bounce)
+            if (boundaryCollided && collisionSpeed * collisionSpeed > foamSpawnThresholdSq) {
+                // Enhanced: Spawn more foam for higher speed collisions
+                const collisionIntensity = Math.min(10, Math.floor(collisionSpeed / FOAM_SPAWN_VELOCITY_THRESHOLD));
+                const numFoamParticles = 1 + Math.floor(collisionIntensity * 0.5);
+                
+                // Spawn foam in the direction of the collision normal
+                spawnDirectionalFoam(p.x, p.y, preCollisionVx, preCollisionVy, 
+                                    collisionNormal.x, collisionNormal.y, numFoamParticles);
+            }
+            // Spawn based on general high velocity (turbulence check AFTER bounce)
+            else {
+                const velSq = p.vx * p.vx + p.vy * p.vy;
+                if (velSq > foamSpawnThresholdSq * 1.2) { // Higher threshold for random spawning
+                    if (Math.random() < 0.03) { // Reduced random spawn rate (was 0.05)
+                        spawnFoam(p.x, p.y, p.vx, p.vy, 1);
+                    }
+                }
+            }
+        } // --- End Foam Spawning ---
+
+
+        // Update position buffer only if collision occurred OR particle separation happened
+        if (boundaryCollided || positionCorrected) {
+             // Final check on position validity after correction
+             if (isInvalid(p.x) || isInvalid(p.y)) {
+                 console.error(`Invalid position AFTER constraint correction for particle ${i}. Resetting.`);
+                 // Don't reset here, maybe integrate handles it? Or reset to a safe boundary pos.
+                 // Fallback position correction: Clamp to bounds forcefully if invalid after corrections.
+                 p.x = Math.max(minX + visualRadius, Math.min(p.x, maxX - visualRadius));
+                 p.y = Math.max(minY + visualRadius, Math.min(p.y, maxY - visualRadius));
+                 // Still check if invalid after clamping
+                 if (isInvalid(p.x) || isInvalid(p.y)) {
+                    // If still invalid, drastic reset might be needed in integrate or a higher level
+                    console.error(`Position still invalid after forceful clamping for particle ${i}.`)
+                 }
+             }
+
+             // Update this particle's position in the buffer
+             if (i * 2 + 1 < particlePositions.length) {
+                particlePositions[i * 2] = p.x;
+                particlePositions[i * 2 + 1] = p.y;
+             }
+
+             // We also need to update the neighbors ('n') that were moved in the GPU buffer.
+             // This is tricky as we don't have their index 'j'.
+             // The simplest approach is to update the *entire* buffer after the constraints loop,
+             // but that's inefficient. A better way is needed if performance becomes an issue.
+             // For now, the buffer update happens in the main loop *after* all constraints.
+        }
+    } // End particle loop
+
+    // Process turbulence map for additional foam spawning - only if foam is enabled
     if (enableFoam && turbulenceMap) {
         const turbulentCells = Object.keys(turbulenceMap);
-        // Randomly sample only a few cells to reduce foam generation
-        const sampleSize = Math.min(5, turbulentCells.length);
-        for (let i = 0; i < sampleSize; i++) {
-            const randomIndex = Math.floor(Math.random() * turbulentCells.length);
-            const cellKey = turbulentCells[randomIndex];
+        for (const cellKey of turbulentCells) {
             const cell = turbulenceMap[cellKey];
-            
-            if (cell && cell.count >= 3) {
+            if (cell.count >= 3) { // Require at least 3 particles for significant turbulence
                 const avgVelSq = cell.totalVelSq / cell.count;
-                if (avgVelSq > foamSpawnThresholdSq * 0.8) {
-                    const spawnChance = cell.isNearBoundary ? 0.2 : 0.05; // Reduced chances
+                if (avgVelSq > foamSpawnThresholdSq * 0.8) { // Slightly lower threshold for turbulence
+                    // Higher spawn chance near boundaries
+                    const spawnChance = cell.isNearBoundary ? 0.4 : 0.1;
                     if (Math.random() < spawnChance) {
+                        // Calculate average position for this turbulent cell
                         const foam_x = cell.x;
                         const foam_y = cell.y;
+                        // Generate foam with velocity proportional to turbulence
                         const foamSpeed = Math.sqrt(avgVelSq) * 0.2;
                         const angle = Math.random() * Math.PI * 2;
                         const foam_vx = Math.cos(angle) * foamSpeed;
-                        const foam_vy = Math.sin(angle) * foamSpeed - foamSpeed * 0.5;
+                        const foam_vy = Math.sin(angle) * foamSpeed - foamSpeed * 0.5; // Bias upward
                         
-                        const factors = {
-                            velocityGradient: Math.sqrt(avgVelSq),
-                            surfaceCurvature: cell.isNearBoundary ? 0.5 : 0.2,
-                            turbulence: avgVelSq / foamSpawnThresholdSq
-                        };
-                        
-                        const numFoam = Math.min(2, Math.floor(1 + avgVelSq / foamSpawnThresholdSq));
-                        spawnFoam(foam_x, foam_y, foam_vx, foam_vy, numFoam, factors);
+                        // Spawn more foam in more turbulent areas
+                        const numFoam = cell.isNearBoundary ? 
+                            Math.floor(1 + Math.min(3, avgVelSq / foamSpawnThresholdSq)) : 1;
+                            
+                        spawnFoam(foam_x, foam_y, foam_vx, foam_vy, numFoam);
                     }
                 }
             }
@@ -1467,60 +1500,51 @@ function applyConstraints() {
 
 
 // --- Foam Functions ---
-function spawnFoam(x, y, particleVx, particleVy, numToSpawn = 1, factors = null) {
-    if (!enableFoam) return;
+function spawnFoam(x, y, particleVx, particleVy, numToSpawn = 1) {
+    if (!enableFoam) return; // Check if foam is enabled globally
 
-    const spawnRadius = FOAM_CONFIG.FOAM_SPAWN_RADIUS;
-    const velocityInfluence = FOAM_CONFIG.VELOCITY_INFLUENCE;
-    
     for (let i = 0; i < numToSpawn; i++) {
         if (activeFoamCount < MAX_FOAM_PARTICLES) {
-            // Calculate spawn position with random offset
-            const angle = Math.random() * Math.PI * 2;
-            const radius = Math.random() * spawnRadius;
-            const spawnX = x + Math.cos(angle) * radius;
-            const spawnY = y + Math.sin(angle) * radius;
-            
-            // Calculate foam velocity with influence from particle velocity
-            const spreadAngle = (Math.random() - 0.5) * Math.PI * 0.5;
-            const spreadSpeed = Math.random() * 50 + 20;
-            const foamVx = particleVx * velocityInfluence + Math.cos(spreadAngle) * spreadSpeed;
-            const foamVy = particleVy * velocityInfluence + Math.sin(spreadAngle) * spreadSpeed;
-            
-            // Create foam particle with type based on factors
-            const type = factors && factors.turbulence > FOAM_CONFIG.TURBULENCE_SCALE ? 'turbulent' : 'normal';
-            const foamP = createFoamParticle(spawnX, spawnY, foamVx, foamVy, type);
-            
-            // Set initial turbulence if factors provided
-            if (factors) {
-                foamP.turbulence = factors.turbulence;
-            }
-            
-            // Add to foam particles array
-            if (foamParticles.length <= activeFoamCount) {
+            // Give foam some initial velocity slightly away from the spawn point/surface
+            const spreadAngle = (Math.random() - 0.5) * Math.PI * 0.5; // Spread up/down/out
+            const spreadSpeed = Math.random() * 50 + 20; // Random speed component
+            // Foam velocity is mix of particle velocity and random spread
+            const foamVx = particleVx * 0.1 + Math.cos(spreadAngle) * spreadSpeed;
+            const foamVy = particleVy * 0.1 + Math.sin(spreadAngle) * spreadSpeed;
+
+            const foamP = createFoamParticle(x, y, foamVx, foamVy);
+
+            // Add to the end of the active list within foamParticles array
+            // Resize array if needed (shouldn't happen if MAX_FOAM_PARTICLES is respected)
+            if(foamParticles.length <= activeFoamCount) {
                 foamParticles.push(foamP);
             } else {
+                // Reuse existing slot if available
                 foamParticles[activeFoamCount] = foamP;
             }
-            
-            // Update position buffer
-            if (activeFoamCount * 2 + 1 < foamPositions.length) {
+
+            // Update position in the WebGL buffer immediately
+            if(activeFoamCount * 2 + 1 < foamPositions.length) {
                 foamPositions[activeFoamCount * 2] = foamP.x;
                 foamPositions[activeFoamCount * 2 + 1] = foamP.y;
+            } else {
+                 console.warn("Foam buffer too small for active count during spawn!");
             }
-            
-            // Update color buffer with initial color
-            if (activeFoamCount * 4 + 3 < foamColors.length) {
-                const color = foamP.color;
-                foamColors[activeFoamCount * 4 + 0] = color.r;
-                foamColors[activeFoamCount * 4 + 1] = color.g;
-                foamColors[activeFoamCount * 4 + 2] = color.b;
-                foamColors[activeFoamCount * 4 + 3] = color.a;
+
+            // Update color (RGBA) in the foamColors array
+            if(activeFoamCount * 4 + 3 < foamColors.length) {
+                const initialAlpha = 0.85; // Initial alpha for new foam
+                foamColors[activeFoamCount * 4 + 0] = 1.0; // R
+                foamColors[activeFoamCount * 4 + 1] = 1.0; // G
+                foamColors[activeFoamCount * 4 + 2] = 1.0; // B
+                foamColors[activeFoamCount * 4 + 3] = initialAlpha * (0.8 + Math.random() * 0.2); // A (with some variation)
+            } else {
+                 console.warn("Foam color buffer too small for active count during spawn!");
             }
-            
-            activeFoamCount++;
+
+            activeFoamCount++; // Increment active count
         } else {
-            break;
+            break; // Stop spawning if max foam count reached
         }
     }
 }
@@ -1600,74 +1624,71 @@ function spawnDirectionalFoam(x, y, particleVx, particleVy, normalX, normalY, nu
 }
 
 function updateFoam(dt) {
-    if (!enableFoam || activeFoamCount === 0 || dt <= 0) return;
+    if (!enableFoam || activeFoamCount === 0 || dt <= 0) return; // Check prerequisites
 
-    let currentActiveIndex = 0;
+    let currentActiveIndex = 0; // Index to write the next live particle to
     for (let i = 0; i < activeFoamCount; i++) {
         const p = foamParticles[i];
-        if (!p) continue;
+        if(!p) continue; // Safety check
 
-        // Update age and life
-        p.age += dt;
-        p.life -= dt * (1.0 - FOAM_CONFIG.PERSISTENCE_FACTOR * (1.0 - p.age / p.maxLife));
-        
-        // Update position
+        // Basic physics: gravity, drag/damping
+        p.vx *= 0.985; // Air drag/damping factor (TUNABLE)
+        p.vy *= 0.985;
+        // Foam affected less by gravity? More? TUNABLE
+        p.vy += GRAVITY * 0.15 * dt;
+
         p.x += p.vx * dt;
         p.y += p.vy * dt;
-        
-        // Apply gravity and drag
-        p.vy += GRAVITY * 0.1 * dt; // Reduced gravity effect
-        p.vx *= 0.98; // Horizontal drag
-        p.vy *= 0.98; // Vertical drag
-        
-        // Update color based on age and turbulence
-        const ageRatio = p.age / p.maxLife;
-        const turbulenceFactor = Math.min(1.0, p.turbulence / FOAM_CONFIG.TURBULENCE_SCALE);
-        
-        // Calculate target color
-        p.targetColor.a = 0.9 * (1.0 - ageRatio) * (1.0 - turbulenceFactor * 0.3);
-        p.targetColor.r = 1.0 - turbulenceFactor * 0.2;
-        p.targetColor.g = 1.0 - turbulenceFactor * 0.1;
-        p.targetColor.b = 1.0 + turbulenceFactor * 0.1;
-        
-        // Smoothly transition to target color
-        const colorTransition = Math.min(1.0, dt / FOAM_CONFIG.COLOR_TRANSITION_TIME);
-        p.color.r = lerp(p.color.r, p.targetColor.r, colorTransition);
-        p.color.g = lerp(p.color.g, p.targetColor.g, colorTransition);
-        p.color.b = lerp(p.color.b, p.targetColor.b, colorTransition);
-        p.color.a = lerp(p.color.a, p.targetColor.a, colorTransition);
-        
-        // Keep particle if still alive
-        if (p.life > 0) {
-            // Move particle to new position in array if needed
-            if (currentActiveIndex !== i) {
-                foamParticles[currentActiveIndex] = p;
+        p.life -= dt; // Decrease lifespan
+
+        // Simple boundary collision (gentle bounce or disappear)
+        // Use tank boundaries for foam particles
+        if(tankWidth > 0 && tankHeight > 0){ // Check if tank dimensions are valid
+            const visualRadius = FOAM_PARTICLE_DRAW_SIZE / (2 * window.devicePixelRatio);
+            const minX = tankX + visualRadius;
+            const maxX = tankX + tankWidth - visualRadius;
+            const minY = tankY + visualRadius;
+            const maxY = tankY + tankHeight - visualRadius;
+
+            if (p.x < minX) { p.x = minX; p.vx *= -0.1; } // Gentle bounce
+            if (p.x > maxX) { p.x = maxX; p.vx *= -0.1; }
+            if (p.y < minY) { p.y = minY; p.vy *= -0.1; }
+            // Let foam disappear if it hits the bottom of the tank or goes beyond it
+            if (p.y > maxY) {
+                 p.life = -1; // Kill foam hitting tank bottom
             }
-            
-            // Always update position buffer
+        } else if (canvas) { // Fallback to canvas boundaries if tank is not defined
+            const radius = FOAM_PARTICLE_DRAW_SIZE / (2 * window.devicePixelRatio); // Approximate radius
+            if (p.x < radius) { p.x = radius; p.vx *= -0.1; } // Gentle bounce
+            if (p.x > canvas.width - radius) { p.x = canvas.width - radius; p.vx *= -0.1; }
+            if (p.y < radius) { p.y = radius; p.vy *= -0.1; }
+            // Let foam float off the bottom edge or disappear
+             if (p.y > canvas.height - radius) {
+                 p.life = -1; // Kill foam hitting bottom edge
+            }
+        }
+
+        // Keep particle if alive, compact the array
+        if (p.life > 0) {
+            // Update buffer position for live particles
             if (currentActiveIndex * 2 + 1 < foamPositions.length) {
                 foamPositions[currentActiveIndex * 2] = p.x;
                 foamPositions[currentActiveIndex * 2 + 1] = p.y;
             }
-            
-            // Always update color buffer
-            if (currentActiveIndex * 4 + 3 < foamColors.length) {
-                foamColors[currentActiveIndex * 4 + 0] = p.color.r;
-                foamColors[currentActiveIndex * 4 + 1] = p.color.g;
-                foamColors[currentActiveIndex * 4 + 2] = p.color.b;
-                foamColors[currentActiveIndex * 4 + 3] = p.color.a;
+
+            // If the current particle is not already in its correct compacted position, move it.
+            if (i !== currentActiveIndex) {
+                foamParticles[currentActiveIndex] = p;
             }
-            
-            currentActiveIndex++;
-        } else {
-            // Clear reference to expired foam particle
-            foamParticles[i] = null;
+            currentActiveIndex++; // Increment index for the next live particle
         }
+        // If particle is dead (p.life <= 0), it's effectively removed
+        // because currentActiveIndex is not incremented, so it will be overwritten
+        // by the next live particle or ignored if it's at the end.
     }
-    
-    // Update active count
-    activeFoamCount = currentActiveIndex;
+    activeFoamCount = currentActiveIndex; // Update the count of active particles
 }
+
 
 // --- Drawing ---
 function checkGLError(label) {
@@ -2495,23 +2516,6 @@ function update(currentTime) {
     }
     lastTime = currentTime;
 
-    // --- Simulation Stability Check ---
-    let invalidParticleCount = 0;
-    for (const p of particles) {
-        if (isInvalid(p.x) || isInvalid(p.y) || isInvalid(p.vx) || isInvalid(p.vy)) {
-            invalidParticleCount++;
-        }
-    }
-    // If too many particles are in an invalid state, reset the simulation
-    if (invalidParticleCount > particles.length * 0.1) { // More than 10% invalid
-        console.warn("Too many invalid particles detected, resetting simulation");
-        spawnParticles(); // Reset all particles
-        lastTime = currentTime;
-        requestAnimationFrame(update);
-        return;
-    }
-    // --- End Stability Check ---
-
     // --- Simulation Steps ---
      try {
         // Update spatial grid for neighbor search
@@ -2874,76 +2878,3 @@ function setupSlider(sliderId, initialValue, min, max, updateCallback) {
 }
 
 // --- UI Setup ---
-
-// Calculate local velocity gradient and surface curvature
-function calculateFoamFactors(particle, neighbors) {
-    // Initialize all variables with default values
-    let maxVelDiff = 0;
-    let totalVelDiff = 0;
-    let surfaceCurvature = 0;
-    let turbulence = 0;
-    
-    // Safety check for valid inputs
-    if (!particle || !neighbors || !Array.isArray(neighbors) || neighbors.length === 0) {
-        return { velocityGradient: 0, surfaceCurvature: 0, turbulence: 0 };
-    }
-    
-    // Valid neighbor count (for averaging)
-    let validNeighborCount = 0;
-    
-    // Calculate surface curvature using neighbor positions
-    let centerX = particle.x;
-    let centerY = particle.y;
-    let totalWeight = 0;
-    let weightedX = 0;
-    let weightedY = 0;
-    
-    for (const n of neighbors) {
-        if (!n || !n.particle) continue;
-        
-        const other = n.particle;
-        const dist = n.dist || 0;
-        if (dist < 1e-6) continue;
-        
-        validNeighborCount++;
-        
-        // Velocity gradient calculation - Add a small epsilon to avoid division by zero
-        const velDiff = Math.sqrt(
-            Math.pow((other.vx || 0) - (particle.vx || 0), 2) +
-            Math.pow((other.vy || 0) - (particle.vy || 0), 2)
-        );
-        maxVelDiff = Math.max(maxVelDiff, velDiff);
-        totalVelDiff += velDiff;
-        
-        // Surface curvature calculation with improved safety
-        const weight = 1.0 / Math.max(dist * dist, 1e-10); // Avoid division by near-zero
-        weightedX += (other.x || 0) * weight;
-        weightedY += (other.y || 0) * weight;
-        totalWeight += weight;
-    }
-    
-    // Calculate final values with safety checks
-    if (totalWeight > 1e-10) {
-        weightedX /= totalWeight;
-        weightedY /= totalWeight;
-        
-        // Calculate curvature as deviation from center
-        const dx = weightedX - centerX;
-        const dy = weightedY - centerY;
-        surfaceCurvature = Math.sqrt(dx * dx + dy * dy);
-    }
-    
-    // Calculate turbulence safely, avoid division by zero
-    turbulence = validNeighborCount > 0 ? totalVelDiff / validNeighborCount : 0;
-    
-    // Clamp values to reasonable ranges and avoid NaN/Infinity
-    maxVelDiff = Math.min(1000, Math.max(0, maxVelDiff));
-    surfaceCurvature = Math.min(10, Math.max(0, surfaceCurvature));
-    turbulence = Math.min(500, Math.max(0, turbulence));
-    
-    return {
-        velocityGradient: maxVelDiff,
-        surfaceCurvature: surfaceCurvature,
-        turbulence: turbulence
-    };
-}
